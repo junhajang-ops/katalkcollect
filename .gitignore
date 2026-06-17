@@ -1,0 +1,18 @@
+# === 런타임 데이터 — 절대 커밋 금지 (타인의 개인정보 포함) ===
+kakao_logs/
+GLOBAL_LOG.json
+log.json
+log.json.bak
+*.bak
+path_test.txt
+retention_cleanup_state.json
+
+# === 환경 / 비밀 ===
+.env
+.env.local
+*.local.json
+
+# === 의존성 / OS ===
+node_modules/
+.DS_Store
+Thumbs.db
