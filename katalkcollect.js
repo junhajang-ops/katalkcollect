@@ -87,6 +87,11 @@ const RETENTION_STATE_PATH = BASE_DIR + "/retention_cleanup_state.json";
 const WRITE_RAW_LOG = true;
 const WRITE_LLM_LOG = true;
 
+// 메시지마다 찍던 상세 "file check" 디버그 로그 (경로/크기 전체).
+// 평상시 false 권장 — 이 로그가 log.json 비대화의 주범이라 엔진 OOM/크래시 유발.
+// 파일 저장 문제를 추적할 때만 일시적으로 true.
+const DEBUG_FILE_CHECK = false;
+
 // ============================================================================
 // 보관 기간 / 자동 정리 설정
 // ============================================================================
@@ -95,6 +100,12 @@ const RETENTION_DAYS = 365;
 const RETENTION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const BOT_LOG_MAX_BYTES = 5 * 1024 * 1024;
 let lastRetentionCleanupAtMs = 0;
+
+// log.json 크기 기반 상시 truncate (24h retention 주기와 무관).
+// retention cleanup 사이에 log.json이 수십 MB로 커져 엔진 OOM/크래시가 나던 문제 방지.
+// 매 메시지 file.length()만 확인하므로 가볍고, 쓰로틀로 과도한 truncate를 막음.
+const BOT_LOG_SIZE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+let lastBotLogSizeCheckAtMs = 0;
 
 // ============================================================================
 // 중복 제거 설정
@@ -635,6 +646,38 @@ function maybeRunRetentionCleanup(reason) {
   }
 }
 
+// log.json이 BOT_LOG_MAX_BYTES를 넘으면 즉시 비움 (retention 주기 무관).
+// 쓰로틀로 BOT_LOG_SIZE_CHECK_INTERVAL_MS마다 1회만 크기 확인.
+function maybeTruncateBotLogBySize() {
+  try {
+    const nowMs = Date.now();
+
+    if (
+      lastBotLogSizeCheckAtMs > 0 &&
+      nowMs - lastBotLogSizeCheckAtMs < BOT_LOG_SIZE_CHECK_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastBotLogSizeCheckAtMs = nowMs;
+
+    const file = new File(BOT_LOG_PATH);
+    if (!file.exists() || !file.isFile()) {
+      return;
+    }
+
+    if (file.length() > BOT_LOG_MAX_BYTES) {
+      writeAllText(BOT_LOG_PATH, "[]");
+      Log.i(
+        "[KAKAO_LOGGER] bot log truncated by size" +
+        " path=" + BOT_LOG_PATH +
+        " maxBytes=" + BOT_LOG_MAX_BYTES
+      );
+    }
+  } catch (e) {
+    Log.e("[KAKAO_LOGGER_BOTLOG_ERROR] " + e);
+  }
+}
+
 // Dedup
 function makeDedupKey(room, sender, msg) {
   return String(room) + "|" + String(sender) + "|" + String(msg);
@@ -865,31 +908,33 @@ function saveMessage(
 
   const indexFile = appendLine(paths.indexPath, JSON.stringify(indexRecord));
 
-  Log.i(
-    "[KAKAO_LOGGER] file check" +
-    " basePath=" + BASE_DIR +
-    " segment=" + kst.segmentKey +
+  if (DEBUG_FILE_CHECK) {
+    Log.i(
+      "[KAKAO_LOGGER] file check" +
+      " basePath=" + BASE_DIR +
+      " segment=" + kst.segmentKey +
 
-    " allRawPath=" + paths.allRawPath +
-    " allRawExists=" + (allRawFile != null ? allRawFile.exists() : false) +
-    " allRawSize=" + (allRawFile != null ? allRawFile.length() : 0) +
+      " allRawPath=" + paths.allRawPath +
+      " allRawExists=" + (allRawFile != null ? allRawFile.exists() : false) +
+      " allRawSize=" + (allRawFile != null ? allRawFile.length() : 0) +
 
-    " roomRawPath=" + paths.roomRawPath +
-    " roomRawExists=" + (roomRawFile != null ? roomRawFile.exists() : false) +
-    " roomRawSize=" + (roomRawFile != null ? roomRawFile.length() : 0) +
+      " roomRawPath=" + paths.roomRawPath +
+      " roomRawExists=" + (roomRawFile != null ? roomRawFile.exists() : false) +
+      " roomRawSize=" + (roomRawFile != null ? roomRawFile.length() : 0) +
 
-    " allLlmPath=" + paths.allLlmPath +
-    " allLlmExists=" + (allLlmFile != null ? allLlmFile.exists() : false) +
-    " allLlmSize=" + (allLlmFile != null ? allLlmFile.length() : 0) +
+      " allLlmPath=" + paths.allLlmPath +
+      " allLlmExists=" + (allLlmFile != null ? allLlmFile.exists() : false) +
+      " allLlmSize=" + (allLlmFile != null ? allLlmFile.length() : 0) +
 
-    " roomLlmPath=" + paths.roomLlmPath +
-    " roomLlmExists=" + (roomLlmFile != null ? roomLlmFile.exists() : false) +
-    " roomLlmSize=" + (roomLlmFile != null ? roomLlmFile.length() : 0) +
+      " roomLlmPath=" + paths.roomLlmPath +
+      " roomLlmExists=" + (roomLlmFile != null ? roomLlmFile.exists() : false) +
+      " roomLlmSize=" + (roomLlmFile != null ? roomLlmFile.length() : 0) +
 
-    " indexPath=" + paths.indexPath +
-    " indexExists=" + indexFile.exists() +
-    " indexSize=" + indexFile.length()
-  );
+      " indexPath=" + paths.indexPath +
+      " indexExists=" + indexFile.exists() +
+      " indexSize=" + indexFile.length()
+    );
+  }
 }
 
 // ============================================================================
@@ -993,6 +1038,7 @@ function response(
     );
 
     maybeRunRetentionCleanup("response");
+    maybeTruncateBotLogBySize();
 
   } catch (e) {
     Log.e("[KAKAO_LOGGER_ERROR] " + e);
@@ -1005,3 +1051,5 @@ function response(
 
 writePathTest();
 maybeRunRetentionCleanup("startup");
+lastBotLogSizeCheckAtMs = 0;
+maybeTruncateBotLogBySize();
