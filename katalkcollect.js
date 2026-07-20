@@ -112,7 +112,11 @@ let lastBotLogSizeCheckAtMs = 0;
 // ============================================================================
 
 // 같은 room + sender + msg가 3초 안에 다시 들어오면 중복으로 판단
-const recent = {};
+// response()는 알림 리스너 콜백 스레드에서 동시 실행되므로 평범한 JS 객체를
+// 쓰면 동시 수정 시 Rhino 내부 슬롯(orderedNext)이 깨져 엔진 크래시가 난다.
+// (2026/07/19 06:08 NullPointerException, 2026/06/22 ArrayIndexOutOfBounds 원인)
+// 스레드 안전한 ConcurrentHashMap으로 교체.
+const recent = new java.util.concurrent.ConcurrentHashMap();
 const DEDUP_TTL_MS = 3000;
 const CACHE_KEEP_MS = 60000;
 
@@ -687,23 +691,25 @@ function isDuplicate(room, sender, msg) {
   const now = Date.now();
   const key = makeDedupKey(room, sender, msg);
 
-  if (recent[key] && now - recent[key] < DEDUP_TTL_MS) {
+  const prev = recent.get(key);
+  if (prev !== null && now - prev < DEDUP_TTL_MS) {
     return true;
   }
 
-  recent[key] = now;
+  recent.put(key, now);
   return false;
 }
 
 function cleanupDedupCache() {
   const now = Date.now();
-  const keys = Object.keys(recent);
-
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i];
-
-    if (now - recent[key] > CACHE_KEEP_MS) {
-      delete recent[key];
+  // ConcurrentHashMap의 iterator는 약한 일관성이라 순회 중 동시 수정에도
+  // 예외/슬롯 손상이 없다.
+  const it = recent.keySet().iterator();
+  while (it.hasNext()) {
+    const key = it.next();
+    const v = recent.get(key);
+    if (v !== null && now - v > CACHE_KEEP_MS) {
+      recent.remove(key);
     }
   }
 }
